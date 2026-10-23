@@ -70,23 +70,61 @@ jobs:
         run: |
           NPROC=$(sysctl -n hw.ncpu)
           echo "Building with $NPROC parallel jobs..."
-          cmake --build build/ios-vulkan --target z_generals -j $NPROC 2>&1 | tee build.log || (tail -n 100 build.log && exit 1)
+          cmake --build build/ios-vulkan --target z_generals -j $NPROC
 
       - name: "Package App into IPA"
         run: |
-          echo "==> Assembling iOS App Bundle"
-          ./scripts/build/ios/package-ios-zh.sh --dev || true
+          echo "==> Generating Xcode shell project"
+          (cd ios && xcodegen generate)
 
-          APP_DIR="build/ios-package/GeneralsXZH.app"
-          if [ ! -d "$APP_DIR" ]; then
-            APP_DIR="build/ios-vulkan/GeneralsMD/GeneralsXZH.app"
+          echo "==> Building unsigned shell app"
+          xcodebuild -project ios/GeneralsXZH.xcodeproj \
+            -scheme GeneralsXZH -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath ios/build \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            build | tail -10
+
+          SHELL_APP=$(find ios/build -name "GeneralsXZH.app" -type d | head -1)
+          echo "Shell app located at: $SHELL_APP"
+
+          ENGINE_BIN=$(find build/ios-vulkan -name "GeneralsXZH" -type f | head -1)
+          echo "Compiled Engine binary located at: $ENGINE_BIN"
+
+          echo "==> Assembling application bundle"
+          rm -rf app-staging Payload
+          mkdir -p app-staging Payload
+          cp -R "$SHELL_APP" app-staging/GeneralsXZH.app
+          APP="app-staging/GeneralsXZH.app"
+
+          # Replace stub binary with compiled game engine
+          cp "$ENGINE_BIN" "$APP/GeneralsXZH"
+          chmod +x "$APP/GeneralsXZH"
+
+          # Embed dynamic runtime libraries (DXVK, MoltenVK, SDL3, OpenAL)
+          mkdir -p "$APP/Frameworks"
+          find build/ios-vulkan -name "*.dylib" -exec cp {} "$APP/Frameworks/" \; 2>/dev/null || true
+          MVK=$(find "$HOME" -name "MoltenVK.framework" -type d | head -1)
+          if [ -n "$MVK" ]; then
+            echo "Embedding MoltenVK framework from: $MVK"
+            cp -R "$MVK" "$APP/Frameworks/"
           fi
 
-          echo "==> Creating IPA distribution package"
-          mkdir -p Payload
-          cp -R "$APP_DIR" Payload/
+          # Stage configs and fonts
+          mkdir -p "$APP/GameData/fonts"
+          cp ios/config/* "$APP/GameData/" 2>/dev/null || true
+          find "$HOME" -name "*.ttf" -exec cp {} "$APP/GameData/fonts/" \; 2>/dev/null || true
+
+          # Ad-hoc sign for sideloading
+          codesign --force --deep --sign - "$APP" || true
+
+          # Package into IPA
+          cp -R "$APP" Payload/
           zip -qr9 GeneralsZeroHour.ipa Payload
-          echo "==> Success! GeneralsZeroHour.ipa created."
+          echo "==> Final IPA size:"
+          ls -lh GeneralsZeroHour.ipa
 
       - name: "Upload IPA to GitHub Artifacts"
         uses: actions/upload-artifact@v4
