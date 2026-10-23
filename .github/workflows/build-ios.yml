@@ -19,18 +19,21 @@ jobs:
           submodules: recursive
           fetch-depth: 0
 
-      - name: "Setup vcpkg"
-        uses: lukka/run-vcpkg@v11
-        with:
-          vcpkgGitCommitId: "ffc071e0c08432c60c9b64f00334c0227667931b"
-
-      - name: "Install Build Tools"
+      - name: "Install Build Tools & Autotools"
         env:
           HOMEBREW_NO_AUTO_UPDATE: "1"
           HOMEBREW_NO_INSTALL_CLEANUP: "1"
         run: |
-          echo "==> Installing only required missing tools via Homebrew without update"
-          brew install xcodegen glslang sdl3 meson || true
+          echo "==> Installing build tools via Homebrew"
+          brew install autoconf automake libtool pkg-config nasm xcodegen glslang sdl3 meson || true
+
+      - name: "Setup vcpkg (Full Clone for Baseline Support)"
+        run: |
+          echo "==> Cloning vcpkg (full clone required for manifest baseline)"
+          git clone https://github.com/microsoft/vcpkg.git "$HOME/vcpkg"
+          "$HOME/vcpkg/bootstrap-vcpkg.sh" -disableMetrics
+          echo "VCPKG_ROOT=$HOME/vcpkg" >> $GITHUB_ENV
+          echo "$HOME/vcpkg" >> $GITHUB_PATH
 
       - name: "Install Vulkan SDK and MoltenVK"
         run: |
@@ -48,6 +51,8 @@ jobs:
 
       - name: "Configure CMake for iOS"
         env:
+          VCPKG_ROOT: ${{ env.VCPKG_ROOT }}
+          VULKAN_SDK: ${{ env.VULKAN_SDK }}
           CC: clang
           CXX: clang++
         run: |
