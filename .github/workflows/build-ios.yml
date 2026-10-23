@@ -37,12 +37,16 @@ jobs:
 
       - name: "Install Vulkan SDK and MoltenVK"
         run: |
-          echo "==> Downloading and extracting Vulkan SDK"
+          echo "==> Downloading and installing LunarG Vulkan SDK"
           VULKAN_ZIP="/tmp/vulkansdk-macos-1.4.341.1.zip"
           curl -fL -o "$VULKAN_ZIP" "https://sdk.lunarg.com/sdk/download/1.4.341.1/mac/vulkansdk-macos-1.4.341.1.zip"
-          unzip -q "$VULKAN_ZIP" -d /tmp/vulkan-sdk
-          echo "VULKAN_SDK=/tmp/vulkan-sdk/macOS" >> $GITHUB_ENV
-          echo "/tmp/vulkan-sdk/macOS/bin" >> $GITHUB_PATH
+          unzip -q -o "$VULKAN_ZIP" -d /tmp/vulkan-extract
+          VULKAN_APP=$(find /tmp/vulkan-extract -name "*.app" -type d | head -1)
+          INSTALLER="$VULKAN_APP/Contents/MacOS/vulkansdk-macOS-1.4.341.1"
+          chmod +x "$INSTALLER"
+          "$INSTALLER" --root "$HOME/VulkanSDK/1.4.341.1" --accept-licenses --default-answer --confirm-command install
+          echo "VULKAN_SDK=$HOME/VulkanSDK/1.4.341.1/macOS" >> $GITHUB_ENV
+          echo "$HOME/VulkanSDK/1.4.341.1/macOS/bin" >> $GITHUB_PATH
 
           echo "==> Staging iOS MoltenVK and Liberation Fonts"
           chmod +x scripts/build/ios/*.sh
@@ -60,10 +64,13 @@ jobs:
           cmake --preset ios-vulkan
 
       - name: "Compile Zero Hour Engine"
+        env:
+          VCPKG_ROOT: ${{ env.VCPKG_ROOT }}
+          VULKAN_SDK: ${{ env.VULKAN_SDK }}
         run: |
           NPROC=$(sysctl -n hw.ncpu)
           echo "Building with $NPROC parallel jobs..."
-          cmake --build build/ios-vulkan --target z_generals -j $NPROC
+          cmake --build build/ios-vulkan --target z_generals -j $NPROC 2>&1 | tee build.log || (tail -n 100 build.log && exit 1)
 
       - name: "Package App into IPA"
         run: |
