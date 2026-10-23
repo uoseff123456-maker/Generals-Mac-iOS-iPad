@@ -1,0 +1,77 @@
+name: Build iOS IPA
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+jobs:
+  build-ios:
+    name: Build Generals Zero Hour iOS IPA
+    runs-on: macos-14
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout Repository with Submodules
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Setup vcpkg
+        uses: lukka/run-vcpkg@v11
+        with:
+          vcpkgGitCommitId: 'ffc071e0c08432c60c9b64f00334c0227667931b'
+
+      - name: Install macOS & iOS Build Dependencies
+        run: |
+          echo "==> Installing build tools via Homebrew"
+          brew update
+          brew install cmake ninja meson pkg-config xcodegen glslang sdl3 freetype fontconfig autoconf automake libtool
+
+      - name: Install Vulkan SDK & MoltenVK
+        run: |
+          echo "==> Downloading and extracting Vulkan SDK with MoltenVK"
+          VULKAN_ZIP="/tmp/vulkansdk-macos-1.4.341.1.zip"
+          curl -fL -o "$VULKAN_ZIP" "https://sdk.lunarg.com/sdk/download/1.4.341.1/mac/vulkansdk-macos-1.4.341.1.zip"
+          unzip -q "$VULKAN_ZIP" -d /tmp/vulkan-sdk
+          echo "VULKAN_SDK=/tmp/vulkan-sdk/macOS" >> $GITHUB_ENV
+          echo "/tmp/vulkan-sdk/macOS/bin" >> $GITHUB_PATH
+
+          echo "==> Staging iOS MoltenVK & Liberation Fonts"
+          chmod +x scripts/build/ios/*.sh
+          ./scripts/build/ios/fetch-moltenvk.sh
+          ./scripts/build/ios/stage-fonts.sh
+
+      - name: Configure CMake (Preset: ios-vulkan)
+        run: |
+          git submodule update --init references/fbraz3-dxvk || true
+          cmake --preset ios-vulkan
+
+      - name: Compile Zero Hour Engine (z_generals)
+        run: |
+          cmake --build build/ios-vulkan --target z_generals -j 4
+
+      - name: Package App into .IPA
+        run: |
+          echo "==> Assembling iOS App Bundle"
+          ./scripts/build/ios/package-ios-zh.sh --dev || true
+
+          APP_DIR="build/ios-package/GeneralsXZH.app"
+          if [ ! -d "$APP_DIR" ]; then
+            APP_DIR="build/ios-vulkan/GeneralsMD/GeneralsXZH.app"
+          fi
+
+          echo "==> Creating IPA distribution package"
+          mkdir -p Payload
+          cp -R "$APP_DIR" Payload/
+          zip -qr9 GeneralsZeroHour.ipa Payload
+          echo "==> Success! GeneralsZeroHour.ipa created."
+
+      - name: Upload IPA to GitHub Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: Generals-Zero-Hour-iOS-IPA
+          path: GeneralsZeroHour.ipa
+          retention-days: 14
