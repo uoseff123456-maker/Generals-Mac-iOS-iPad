@@ -10,7 +10,7 @@ jobs:
   build-ios:
     name: "Build Generals Zero Hour iOS IPA"
     runs-on: macos-14
-    timeout-minutes: 120
+    timeout-minutes: 90
 
     steps:
       - name: "Checkout Repository with Submodules"
@@ -24,15 +24,17 @@ jobs:
         with:
           vcpkgGitCommitId: "ffc071e0c08432c60c9b64f00334c0227667931b"
 
-      - name: "Install macOS and iOS Build Dependencies"
+      - name: "Install Build Tools"
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: "1"
+          HOMEBREW_NO_INSTALL_CLEANUP: "1"
         run: |
-          echo "==> Installing build tools via Homebrew"
-          brew update
-          brew install cmake ninja meson pkg-config xcodegen glslang sdl3 freetype fontconfig autoconf automake libtool
+          echo "==> Installing only required missing tools via Homebrew without update"
+          brew install xcodegen glslang sdl3 meson || true
 
       - name: "Install Vulkan SDK and MoltenVK"
         run: |
-          echo "==> Downloading and extracting Vulkan SDK with MoltenVK"
+          echo "==> Downloading and extracting Vulkan SDK"
           VULKAN_ZIP="/tmp/vulkansdk-macos-1.4.341.1.zip"
           curl -fL -o "$VULKAN_ZIP" "https://sdk.lunarg.com/sdk/download/1.4.341.1/mac/vulkansdk-macos-1.4.341.1.zip"
           unzip -q "$VULKAN_ZIP" -d /tmp/vulkan-sdk
@@ -45,13 +47,18 @@ jobs:
           ./scripts/build/ios/stage-fonts.sh
 
       - name: "Configure CMake for iOS"
+        env:
+          CC: clang
+          CXX: clang++
         run: |
           git submodule update --init references/fbraz3-dxvk || true
           cmake --preset ios-vulkan
 
       - name: "Compile Zero Hour Engine"
         run: |
-          cmake --build build/ios-vulkan --target z_generals -j 4
+          NPROC=$(sysctl -n hw.ncpu)
+          echo "Building with $NPROC parallel jobs..."
+          cmake --build build/ios-vulkan --target z_generals -j $NPROC
 
       - name: "Package App into IPA"
         run: |
