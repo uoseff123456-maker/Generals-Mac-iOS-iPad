@@ -68,9 +68,8 @@ jobs:
           VCPKG_ROOT: ${{ env.VCPKG_ROOT }}
           VULKAN_SDK: ${{ env.VULKAN_SDK }}
         run: |
-          NPROC=$(sysctl -n hw.ncpu)
-          echo "Building with $NPROC parallel jobs..."
-          cmake --build build/ios-vulkan --target z_generals -j $NPROC
+          echo "Building with controlled parallel jobs to protect memory..."
+          cmake --build build/ios-vulkan --target z_generals -j 2 2>&1 | tee build.log || (tail -n 50 build.log && exit 1)
 
       - name: "Package App into IPA"
         run: |
@@ -106,7 +105,7 @@ jobs:
           # Embed dynamic runtime libraries (DXVK, MoltenVK, SDL3, OpenAL)
           mkdir -p "$APP/Frameworks"
           find build/ios-vulkan -name "*.dylib" -exec cp {} "$APP/Frameworks/" \; 2>/dev/null || true
-          MVK=$(find "$HOME" -name "MoltenVK.framework" -type d | head -1)
+          MVK=$(find "$HOME" "/tmp" -name "MoltenVK.framework" -type d | head -1)
           if [ -n "$MVK" ]; then
             echo "Embedding MoltenVK framework from: $MVK"
             cp -R "$MVK" "$APP/Frameworks/"
