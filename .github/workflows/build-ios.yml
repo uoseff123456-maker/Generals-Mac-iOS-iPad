@@ -8,14 +8,16 @@ on:
 
 jobs:
   build-ios:
-    name: "Build Generals Zero Hour iOS IPA"
+    name: "Build Generals Zero Hour iOS IPA (Pro Touch & GroupPanel)"
     runs-on: macos-15
     timeout-minutes: 90
 
     steps:
-      - name: "Checkout Repository with Submodules"
+      - name: "Checkout Unified Mobile Engine (MYSOREZ)"
         uses: actions/checkout@v4
         with:
+          repository: 'MYSOREZ/GeneralsZH-Android-Port'
+          ref: 'main'
           submodules: recursive
           fetch-depth: 0
 
@@ -78,19 +80,6 @@ jobs:
           CXX: clang++
         run: |
           git submodule update --init references/fbraz3-dxvk || true
-
-          python3 -c '
-          p = "GeneralsMD/Code/Main/SDL3Main.cpp"
-          s = open(p, "r", encoding="utf-8").read()
-          t1 = "if (bundleData[0] != '\''\\0'\'' && access(bundleData, R_OK) == 0)"
-          r1 = "if (bundleData[0] != '\''\\0'\'' && access((std::string(bundleData) + \"/INIZH.big\").c_str(), R_OK) == 0)"
-          t2 = "fprintf(stderr, \"INFO: iOS working directory (Documents): %s\\n\", docs);"
-          r2 = t2 + "\nif (bundleData[0] != '\''\\0'\'' && access(bundleData, R_OK) == 0) { std::error_code ec; std::filesystem::create_directories(\"fonts\", ec); std::filesystem::copy(std::string(bundleData) + \"/fonts\", \"fonts\", std::filesystem::copy_options::overwrite_existing | std::filesystem::copy_options::recursive, ec); std::filesystem::copy_file(std::string(bundleData) + \"/dxvk.conf\", \"dxvk.conf\", std::filesystem::copy_options::overwrite_existing, ec); std::string uDir = std::string(home) + \"/Library/Application Support/GeneralsX/GeneralsZH\"; if (access((uDir + \"/Options.ini\").c_str(), F_OK) != 0) { std::filesystem::create_directories(uDir, ec); std::filesystem::copy_file(std::string(bundleData) + \"/DefaultOptions.ini\", uDir + \"/Options.ini\", ec); } }"
-          s = s.replace(t1, r1, 1).replace(t2, r2, 1)
-          open(p, "w", encoding="utf-8").write(s)
-          print("Patched SDL3Main.cpp successfully")
-          '
-
           cmake --preset ios-vulkan
 
       - name: "Compile Zero Hour Engine"
@@ -113,17 +102,14 @@ jobs:
         run: |
           echo "==> Locating compiled Engine binary"
           ENGINE_BIN=$(find build/ios-vulkan -name "GeneralsXZH" -type f | head -1)
-          echo "Engine binary: $ENGINE_BIN"
 
           rm -rf Payload GeneralsZeroHour.ipa
           APP="Payload/GeneralsXZH.app"
-          mkdir -p "$APP/Frameworks" "$APP/GameData/fonts"
+          mkdir -p "$APP/Frameworks" "$APP/GameData/fonts" "$APP/GameData/Window"
 
-          # Copy compiled engine executable
           cp "$ENGINE_BIN" "$APP/GeneralsXZH"
           chmod +x "$APP/GeneralsXZH"
 
-          # Build clean Info.plist using Python plistlib
           python3 -c '
           import plistlib
           info = {
@@ -170,7 +156,6 @@ jobs:
           plutil -lint "$APP/Info.plist"
           printf "APPL????" > "$APP/PkgInfo"
 
-          # Generate app icons
           ICON_SRC="ios/Stub/Assets.xcassets/AppIcon.appiconset/icon.png"
           if [ -f "$ICON_SRC" ]; then
             sips -z 120 120 "$ICON_SRC" --out "$APP/AppIcon60x60@2x.png" >/dev/null
@@ -179,7 +164,6 @@ jobs:
             sips -z 167 167 "$ICON_SRC" --out "$APP/AppIcon83.5x83.5@2x.png" >/dev/null
           fi
 
-          # Embed runtime dylibs
           for lib in \
             "build/ios-vulkan/_deps/dxvk-build-macos/src/d3d8/libdxvk_d3d8.0.dylib" \
             "build/ios-vulkan/_deps/dxvk-build-macos/src/d3d9/libdxvk_d3d9.0.dylib" \
@@ -193,25 +177,29 @@ jobs:
             fi
           done
 
-          # Match openal install_name (libopenal.1.dylib)
           if [ -f "$APP/Frameworks/libopenal.1.24.2.dylib" ]; then
             cp "$APP/Frameworks/libopenal.1.24.2.dylib" "$APP/Frameworks/libopenal.1.dylib"
           fi
 
-          # Embed dynamic MoltenVK.framework
           MVK_FW="$HOME/GeneralsX/MoltenVK/MoltenVK/MoltenVK/dynamic/MoltenVK.xcframework/ios-arm64/MoltenVK.framework"
           if [ ! -d "$MVK_FW" ]; then
             MVK_FW=$(find "$HOME" -name "MoltenVK.framework" -path "*ios-arm64*" -type d 2>/dev/null | head -1)
           fi
           cp -R "$MVK_FW" "$APP/Frameworks/"
-          echo "Embedded MoltenVK.framework from $MVK_FW"
 
-          # Stage configs and fonts
           cp ios/config/dxvk.conf "$APP/GameData/dxvk.conf"
           cp ios/config/Options.ini "$APP/GameData/DefaultOptions.ini"
           cp "$HOME/GeneralsX/ios-staging/fonts/"*.ttf "$APP/GameData/fonts/"
 
-          # Add Frameworks rpath & ad-hoc sign inside-out
+          if [ -f "android/app/src/main/assets/gamedata/Window/GroupPanel.wnd" ]; then
+            cp "android/app/src/main/assets/gamedata/Window/GroupPanel.wnd" "$APP/GameData/Window/"
+            echo "==> Embedded GroupPanel.wnd"
+          fi
+          if [ -f "android/app/src/main/assets/gamedata/Window/ExtrasMenu.wnd" ]; then
+            cp "android/app/src/main/assets/gamedata/Window/ExtrasMenu.wnd" "$APP/GameData/Window/"
+            echo "==> Embedded ExtrasMenu.wnd"
+          fi
+
           install_name_tool -add_rpath "@executable_path/Frameworks" "$APP/GeneralsXZH" 2>/dev/null || true
           for f in "$APP/Frameworks/"*.dylib; do
             [ -f "$f" ] && codesign --force --sign - --timestamp=none "$f"
@@ -221,13 +209,11 @@ jobs:
           fi
           codesign --force --sign - --timestamp=none "$APP"
 
-          # Package into IPA
           zip -qr9 GeneralsZeroHour.ipa Payload
-          ls -lh GeneralsZeroHour.ipa
 
       - name: "Upload IPA to GitHub Artifacts"
         uses: actions/upload-artifact@v4
         with:
-          name: "Generals-Zero-Hour-iOS-IPA"
+          name: "Generals-Zero-Hour-iOS-Pro-Touch-IPA"
           path: "GeneralsZeroHour.ipa"
           retention-days: 14
