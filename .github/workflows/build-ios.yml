@@ -1,0 +1,217 @@
+name: "Build iOS IPA"
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+jobs:
+  build-ios:
+    name: "Build Generals Zero Hour iOS IPA (Pro Touch & GroupPanel)"
+    runs-on: macos-15
+    timeout-minutes: 90
+
+    steps:
+      - name: "Checkout Repository with Submodules"
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: "Install Build Tools & Autotools"
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: "1"
+          HOMEBREW_NO_INSTALL_CLEANUP: "1"
+        run: |
+          echo "==> Installing build tools via Homebrew"
+          brew install autoconf autoconf-archive automake libtool pkg-config nasm glslang sdl3 meson ninja cmake || true
+
+      - name: "Setup vcpkg (Full Clone for Baseline Support)"
+        run: |
+          echo "==> Cloning vcpkg (full clone required for manifest baseline)"
+          git clone https://github.com/microsoft/vcpkg.git "$HOME/vcpkg"
+          "$HOME/vcpkg/bootstrap-vcpkg.sh" -disableMetrics
+          echo "VCPKG_ROOT=$HOME/vcpkg" >> $GITHUB_ENV
+          echo "$HOME/vcpkg" >> $GITHUB_PATH
+
+      - name: "Install Vulkan SDK and MoltenVK"
+        run: |
+          echo "==> Downloading and installing LunarG Vulkan SDK"
+          VULKAN_ZIP="/tmp/vulkansdk-macos-1.4.341.1.zip"
+          curl -fL -o "$VULKAN_ZIP" "https://sdk.lunarg.com/sdk/download/1.4.341.1/mac/vulkansdk-macos-1.4.341.1.zip"
+          unzip -q -o "$VULKAN_ZIP" -d /tmp/vulkan-extract
+          VULKAN_APP=$(find /tmp/vulkan-extract -name "*.app" -type d | head -1)
+          INSTALLER="$VULKAN_APP/Contents/MacOS/vulkansdk-macOS-1.4.341.1"
+          chmod +x "$INSTALLER"
+          "$INSTALLER" --root "$HOME/VulkanSDK/1.4.341.1" --accept-licenses --default-answer --confirm-command install com.lunarg.vulkan.core com.lunarg.vulkan.ios || \
+          "$INSTALLER" --root "$HOME/VulkanSDK/1.4.341.1" --accept-licenses --default-answer --confirm-command install
+
+          echo "VULKAN_SDK=$HOME/VulkanSDK/1.4.341.1/macOS" >> $GITHUB_ENV
+          echo "$HOME/VulkanSDK/1.4.341.1/macOS/bin" >> $GITHUB_PATH
+
+          echo "==> Staging iOS MoltenVK and Liberation Fonts"
+          chmod +x scripts/build/ios/*.sh
+          ./scripts/build/ios/fetch-moltenvk.sh
+          ./scripts/build/ios/stage-fonts.sh
+
+          TARGET_MVK_A="$HOME/VulkanSDK/1.4.341.1/macOS/lib/MoltenVK.xcframework/ios-arm64/libMoltenVK.a"
+          if [ ! -f "$TARGET_MVK_A" ]; then
+            mkdir -p "$(dirname "$TARGET_MVK_A")"
+            FOUND_MVK_A=$(find "$HOME/VulkanSDK" "$HOME/GeneralsX/MoltenVK" -path "*ios-arm64*" -name "libMoltenVK.a" 2>/dev/null | head -1)
+            if [ -n "$FOUND_MVK_A" ]; then
+              cp "$FOUND_MVK_A" "$TARGET_MVK_A"
+              echo "==> Copied libMoltenVK.a from $FOUND_MVK_A"
+            else
+              xcrun -sdk iphoneos clang -arch arm64 -miphoneos-version-min=16.0 -c -x c /dev/null -o /tmp/mvk_stub.o
+              xcrun -sdk iphoneos ar rcs "$TARGET_MVK_A" /tmp/mvk_stub.o
+              echo "==> Created iOS arm64 link archive at $TARGET_MVK_A"
+            fi
+          fi
+          ls -lh "$TARGET_MVK_A"
+
+      - name: "Configure CMake for iOS"
+        env:
+          VCPKG_ROOT: ${{ env.VCPKG_ROOT }}
+          VULKAN_SDK: ${{ env.VULKAN_SDK }}
+          CC: clang
+          CXX: clang++
+        run: |
+          git submodule update --init references/fbraz3-dxvk || true
+          cmake --preset ios-vulkan
+
+      - name: "Compile Zero Hour Engine"
+        env:
+          VCPKG_ROOT: ${{ env.VCPKG_ROOT }}
+          VULKAN_SDK: ${{ env.VULKAN_SDK }}
+        run: |
+          echo "==> Compiling Zero Hour Engine (z_generals)..."
+          cmake --build build/ios-vulkan --target z_generals -j 2
+
+          ENGINE_BIN=$(find build/ios-vulkan -name "GeneralsXZH" -type f | head -1)
+          if [ -z "$ENGINE_BIN" ]; then
+            echo "ERROR: GeneralsXZH binary was not produced!"
+            exit 1
+          fi
+          echo "==> Engine compiled successfully: $ENGINE_BIN"
+          ls -lh "$ENGINE_BIN"
+
+      - name: "Package App into IPA"
+        run: |
+          echo "==> Locating compiled Engine binary"
+          ENGINE_BIN=$(find build/ios-vulkan -name "GeneralsXZH" -type f | head -1)
+
+          rm -rf Payload GeneralsZeroHour.ipa
+          APP="Payload/GeneralsXZH.app"
+          mkdir -p "$APP/Frameworks" "$APP/GameData/fonts" "$APP/GameData/Window"
+
+          cp "$ENGINE_BIN" "$APP/GeneralsXZH"
+          chmod +x "$APP/GeneralsXZH"
+
+          python3 -c '
+          import plistlib
+          info = {
+              "CADisableMinimumFrameDurationOnPhone": True,
+              "CFBundleDevelopmentRegion": "en",
+              "CFBundleDisplayName": "Generals ZH",
+              "CFBundleExecutable": "GeneralsXZH",
+              "CFBundleIconFiles": [
+                  "AppIcon60x60@2x.png",
+                  "AppIcon60x60@3x.png",
+                  "AppIcon76x76@2x.png",
+                  "AppIcon83.5x83.5@2x.png",
+              ],
+              "CFBundleIdentifier": "me.ammaar.generalszh",
+              "CFBundleInfoDictionaryVersion": "6.0",
+              "CFBundleName": "GeneralsXZH",
+              "CFBundlePackageType": "APPL",
+              "CFBundleShortVersionString": "1.04",
+              "CFBundleSupportedPlatforms": ["iPhoneOS"],
+              "CFBundleVersion": "10",
+              "DTPlatformName": "iphoneos",
+              "LSSupportsOpeningDocumentsInPlace": True,
+              "MinimumOSVersion": "16.0",
+              "NSLocalNetworkUsageDescription": "Used for LAN multiplayer game discovery.",
+              "UIApplicationSupportsIndirectInputEvents": True,
+              "UIDeviceFamily": [1, 2],
+              "UIFileSharingEnabled": True,
+              "UILaunchStoryboardName": "",
+              "UIRequiresFullScreen": True,
+              "UIStatusBarHidden": True,
+              "UISupportedInterfaceOrientations": [
+                  "UIInterfaceOrientationLandscapeLeft",
+                  "UIInterfaceOrientationLandscapeRight",
+              ],
+              "UISupportedInterfaceOrientations~ipad": [
+                  "UIInterfaceOrientationLandscapeLeft",
+                  "UIInterfaceOrientationLandscapeRight",
+              ],
+              "UIViewControllerBasedStatusBarAppearance": False,
+          }
+          with open("Payload/GeneralsXZH.app/Info.plist", "wb") as f:
+              plistlib.dump(info, f)
+          '
+          plutil -lint "$APP/Info.plist"
+          printf "APPL????" > "$APP/PkgInfo"
+
+          ICON_SRC="ios/Stub/Assets.xcassets/AppIcon.appiconset/icon.png"
+          if [ -f "$ICON_SRC" ]; then
+            sips -z 120 120 "$ICON_SRC" --out "$APP/AppIcon60x60@2x.png" >/dev/null
+            sips -z 180 180 "$ICON_SRC" --out "$APP/AppIcon60x60@3x.png" >/dev/null
+            sips -z 152 152 "$ICON_SRC" --out "$APP/AppIcon76x76@2x.png" >/dev/null
+            sips -z 167 167 "$ICON_SRC" --out "$APP/AppIcon83.5x83.5@2x.png" >/dev/null
+          fi
+
+          for lib in \
+            "build/ios-vulkan/_deps/dxvk-build-macos/src/d3d8/libdxvk_d3d8.0.dylib" \
+            "build/ios-vulkan/_deps/dxvk-build-macos/src/d3d9/libdxvk_d3d9.0.dylib" \
+            "build/ios-vulkan/_deps/sdl3-build/libSDL3.0.dylib" \
+            "build/ios-vulkan/_deps/sdl3_image-build/libSDL3_image.0.dylib" \
+            "build/ios-vulkan/_deps/openal_soft-build/libopenal.1.24.2.dylib" \
+            "build/ios-vulkan/libgamespy.dylib"; do
+            if [ -f "$lib" ]; then
+              cp "$lib" "$APP/Frameworks/"
+              echo "Embedded $(basename "$lib")"
+            fi
+          done
+
+          if [ -f "$APP/Frameworks/libopenal.1.24.2.dylib" ]; then
+            cp "$APP/Frameworks/libopenal.1.24.2.dylib" "$APP/Frameworks/libopenal.1.dylib"
+          fi
+
+          MVK_FW="$HOME/GeneralsX/MoltenVK/MoltenVK/MoltenVK/dynamic/MoltenVK.xcframework/ios-arm64/MoltenVK.framework"
+          if [ ! -d "$MVK_FW" ]; then
+            MVK_FW=$(find "$HOME" -name "MoltenVK.framework" -path "*ios-arm64*" -type d 2>/dev/null | head -1)
+          fi
+          cp -R "$MVK_FW" "$APP/Frameworks/"
+
+          cp ios/config/dxvk.conf "$APP/GameData/dxvk.conf"
+          cp ios/config/Options.ini "$APP/GameData/DefaultOptions.ini"
+          cp "$HOME/GeneralsX/ios-staging/fonts/"*.ttf "$APP/GameData/fonts/"
+
+          if [ -f "android/app/src/main/assets/gamedata/Window/GroupPanel.wnd" ]; then
+            cp "android/app/src/main/assets/gamedata/Window/GroupPanel.wnd" "$APP/GameData/Window/"
+            echo "==> Embedded GroupPanel.wnd"
+          fi
+          if [ -f "android/app/src/main/assets/gamedata/Window/ExtrasMenu.wnd" ]; then
+            cp "android/app/src/main/assets/gamedata/Window/ExtrasMenu.wnd" "$APP/GameData/Window/"
+            echo "==> Embedded ExtrasMenu.wnd"
+          fi
+
+          install_name_tool -add_rpath "@executable_path/Frameworks" "$APP/GeneralsXZH" 2>/dev/null || true
+          for f in "$APP/Frameworks/"*.dylib; do
+            [ -f "$f" ] && codesign --force --sign - --timestamp=none "$f"
+          done
+          if [ -d "$APP/Frameworks/MoltenVK.framework" ]; then
+            codesign --force --sign - --timestamp=none "$APP/Frameworks/MoltenVK.framework"
+          fi
+          codesign --force --sign - --timestamp=none "$APP"
+
+          zip -qr9 GeneralsZeroHour.ipa Payload
+
+      - name: "Upload IPA to GitHub Artifacts"
+        uses: actions/upload-artifact@v4
+        with:
+          name: "Generals-Zero-Hour-iOS-Pro-Touch-IPA"
+          path: "GeneralsZeroHour.ipa"
+          retention-days: 14
