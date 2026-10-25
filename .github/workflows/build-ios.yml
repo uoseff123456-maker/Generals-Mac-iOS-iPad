@@ -65,7 +65,7 @@ jobs:
               cp "$FOUND_MVK_A" "$TARGET_MVK_A"
               echo "==> Copied libMoltenVK.a from $FOUND_MVK_A"
             else
-              xcrun -sdk iphoneos clang -arch arm64 -miphoneos-version-min=16.0 -c -x c /dev/null -o /tmp/mvk_stub.o
+              xcrun -sdk iphoneos clang -arch arm64 -miphoneos-version-min=16.4 -c -x c /dev/null -o /tmp/mvk_stub.o
               xcrun -sdk iphoneos ar rcs "$TARGET_MVK_A" /tmp/mvk_stub.o
               echo "==> Created iOS arm64 link archive at $TARGET_MVK_A"
             fi
@@ -78,9 +78,29 @@ jobs:
           VULKAN_SDK: ${{ env.VULKAN_SDK }}
           CC: clang
           CXX: clang++
+          CFLAGS: "-w"
+          CXXFLAGS: "-w -D_LIBCPP_DISABLE_AVAILABILITY"
         run: |
           git submodule update --init references/fbraz3-dxvk || true
-          cmake --preset ios-vulkan
+
+          python3 -c '
+          import json
+          with open("CMakePresets.json", "r") as f:
+              p = json.load(f)
+          for preset in p.get("configurePresets", []):
+              if preset.get("name") == "ios-vulkan":
+                  preset["cacheVariables"]["CMAKE_OSX_DEPLOYMENT_TARGET"] = "16.4"
+                  preset["cacheVariables"]["CMAKE_CXX_FLAGS"] = "-w -D_LIBCPP_DISABLE_AVAILABILITY"
+                  preset["cacheVariables"]["CMAKE_C_FLAGS"] = "-w"
+          with open("CMakePresets.json", "w") as f:
+              json.dump(p, f, indent=4)
+          print("Patched CMakePresets.json successfully")
+          '
+
+          cmake --preset ios-vulkan \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=16.4 \
+            -DCMAKE_CXX_FLAGS="-w -D_LIBCPP_DISABLE_AVAILABILITY" \
+            -DCMAKE_C_FLAGS="-w"
 
       - name: "Compile Zero Hour Engine"
         env:
@@ -132,7 +152,7 @@ jobs:
               "CFBundleVersion": "10",
               "DTPlatformName": "iphoneos",
               "LSSupportsOpeningDocumentsInPlace": True,
-              "MinimumOSVersion": "16.0",
+              "MinimumOSVersion": "16.4",
               "NSLocalNetworkUsageDescription": "Used for LAN multiplayer game discovery.",
               "UIApplicationSupportsIndirectInputEvents": True,
               "UIDeviceFamily": [1, 2],
