@@ -83,6 +83,16 @@ jobs:
         run: |
           git submodule update --init references/fbraz3-dxvk || true
 
+          # 1. Force enable mobile touch schemes (army_buttons, camera_high, attack_move) on iOS
+          python3 -c '
+          p = "Core/GameEngine/Include/Common/GXControlScheme.h"
+          s = open(p, "r", encoding="utf-8").read()
+          s = s.replace("return s_state[option] != 0;", "return true; // Force-enabled on iOS")
+          open(p, "w", encoding="utf-8").write(s)
+          print("Permanently enabled Army Buttons, Camera High, and Attack Move on iOS!")
+          '
+
+          # 2. Patch preset to iOS 16.4 and disable libc++ availability checks
           python3 -c '
           import json
           with open("CMakePresets.json", "r") as f:
@@ -130,12 +140,13 @@ jobs:
           cp "$ENGINE_BIN" "$APP/GeneralsXZH"
           chmod +x "$APP/GeneralsXZH"
 
+          # Brand new Bundle ID and Display Name to force fresh installation on iOS
           python3 -c '
           import plistlib
           info = {
               "CADisableMinimumFrameDurationOnPhone": True,
               "CFBundleDevelopmentRegion": "en",
-              "CFBundleDisplayName": "Generals ZH",
+              "CFBundleDisplayName": "Generals Touch",
               "CFBundleExecutable": "GeneralsXZH",
               "CFBundleIconFiles": [
                   "AppIcon60x60@2x.png",
@@ -143,13 +154,13 @@ jobs:
                   "AppIcon76x76@2x.png",
                   "AppIcon83.5x83.5@2x.png",
               ],
-              "CFBundleIdentifier": "me.ammaar.generalszh",
+              "CFBundleIdentifier": "me.ammaar.generalszhtouch",
               "CFBundleInfoDictionaryVersion": "6.0",
               "CFBundleName": "GeneralsXZH",
               "CFBundlePackageType": "APPL",
-              "CFBundleShortVersionString": "1.04",
+              "CFBundleShortVersionString": "2.0",
               "CFBundleSupportedPlatforms": ["iPhoneOS"],
-              "CFBundleVersion": "10",
+              "CFBundleVersion": "20",
               "DTPlatformName": "iphoneos",
               "LSSupportsOpeningDocumentsInPlace": True,
               "MinimumOSVersion": "16.4",
