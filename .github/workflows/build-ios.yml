@@ -100,8 +100,8 @@ jobs:
           old_bind = "retval=bind(fd,(struct sockaddr *)&addr,sizeof(addr));"
           new_bind = "int one = 1;\nsetsockopt(fd, SOL_SOCKET, SO_REUSEADDR, (const char *)&one, sizeof(one));\n#ifdef SO_REUSEPORT\nsetsockopt(fd, SOL_SOCKET, SO_REUSEPORT, (const char *)&one, sizeof(one));\n#endif\nretval=bind(fd,(struct sockaddr *)&addr,sizeof(addr));"
           s = s.replace(old_bind, new_bind, 1)
-          old_read = "return(retval);\n}"
-          new_read = "if (retval < 0 && (errno == EWOULDBLOCK || errno == EAGAIN)) retval = 0;\nreturn(retval);\n}"
+          old_read = "    if (bret > 0)\n      retval = bret;\n  }\n#endif\n  return(retval);\n}"
+          new_read = "    if (bret > 0)\n      retval = bret;\n  }\n  if (retval < 0 && (errno == EWOULDBLOCK || errno == EAGAIN))\n    retval = 0;\n#endif\n  return(retval);\n}"
           s = s.replace(old_read, new_read, 1)
           s = s.replace("baddr.sin_addr.s_addr = htonl(INADDR_BROADCAST);", "baddr.sin_addr.s_addr = htonl(INADDR_ANY);\n#ifdef SO_REUSEPORT\nsetsockopt(b, SOL_SOCKET, SO_REUSEPORT, &one, sizeof(one));\n#endif", 1)
           open(p_udp, "w", encoding="utf-8").write(s)
@@ -151,17 +151,26 @@ jobs:
           VULKAN_SDK: ${{ env.VULKAN_SDK }}
         run: |
           echo "==> Compiling Zero Hour Engine (z_generals)..."
-          cmake --build build/ios-vulkan --target z_generals --config Release -j$(sysctl -n hw.logicalcpu)
-          ls -lh build/ios-vulkan/GeneralsXZH
+          cmake --build build/ios-vulkan --target z_generals -j 2
+
+          ENGINE_BIN=$(find build/ios-vulkan -name "GeneralsXZH" -type f | head -1)
+          if [ -z "$ENGINE_BIN" ]; then
+            echo "ERROR: GeneralsXZH binary was not produced!"
+            exit 1
+          fi
+          echo "==> Engine compiled successfully: $ENGINE_BIN"
+          ls -lh "$ENGINE_BIN"
 
       - name: "Package App into IPA"
         run: |
-          echo "==> Creating clean iOS App Bundle structure"
-          APP="Payload/GeneralsXZH.app"
-          rm -rf Payload
-          mkdir -p "$APP/Frameworks" "$APP/GameData" "$APP/GameData/Window" "$APP/GameData/fonts"
+          echo "==> Locating compiled Engine binary"
+          ENGINE_BIN=$(find build/ios-vulkan -name "GeneralsXZH" -type f | head -1)
 
-          cp build/ios-vulkan/GeneralsXZH "$APP/GeneralsXZH"
+          rm -rf Payload GeneralsZeroHour.ipa
+          APP="Payload/GeneralsXZH.app"
+          mkdir -p "$APP/Frameworks" "$APP/GameData/fonts" "$APP/GameData/Window"
+
+          cp "$ENGINE_BIN" "$APP/GeneralsXZH"
           chmod +x "$APP/GeneralsXZH"
 
           python3 -c '
