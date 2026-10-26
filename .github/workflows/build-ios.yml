@@ -92,7 +92,40 @@ jobs:
           print("Permanently enabled Army Buttons, Camera High, and Attack Move on iOS!")
           '
 
-          # 2. Patch preset to iOS 16.4 and disable libc++ availability checks
+          # 2. Patch iOS LAN Multiplayer Network Fixes (SO_REUSEADDR, EWOULDBLOCK, Wi-Fi en0, fallback)
+          python3 -c '
+          # 2a. Patch udp.cpp
+          p_udp = "Core/GameEngine/Source/GameNetwork/udp.cpp"
+          s = open(p_udp, "r", encoding="utf-8").read()
+          old_bind = "retval=bind(fd,(struct sockaddr *)&addr,sizeof(addr));"
+          new_bind = "int one = 1;\nsetsockopt(fd, SOL_SOCKET, SO_REUSEADDR, (const char *)&one, sizeof(one));\n#ifdef SO_REUSEPORT\nsetsockopt(fd, SOL_SOCKET, SO_REUSEPORT, (const char *)&one, sizeof(one));\n#endif\nretval=bind(fd,(struct sockaddr *)&addr,sizeof(addr));"
+          s = s.replace(old_bind, new_bind, 1)
+          old_read = "return(retval);\n}"
+          new_read = "if (retval < 0 && (errno == EWOULDBLOCK || errno == EAGAIN)) retval = 0;\nreturn(retval);\n}"
+          s = s.replace(old_read, new_read, 1)
+          s = s.replace("baddr.sin_addr.s_addr = htonl(INADDR_BROADCAST);", "baddr.sin_addr.s_addr = htonl(INADDR_ANY);\n#ifdef SO_REUSEPORT\nsetsockopt(b, SOL_SOCKET, SO_REUSEPORT, &one, sizeof(one));\n#endif", 1)
+          open(p_udp, "w", encoding="utf-8").write(s)
+          print("Patched udp.cpp: SO_REUSEADDR/SO_REUSEPORT and EWOULDBLOCK handled")
+
+          # 2b. Patch IPEnumeration.cpp (detect en0 Wi-Fi and hotspot interfaces on iOS)
+          p_ip = "Core/GameEngine/Source/GameNetwork/IPEnumeration.cpp"
+          s = open(p_ip, "r", encoding="utf-8").read()
+          s = s.replace("prefixes[] = { \"wlan\"", "prefixes[] = { \"en\", \"ap\", \"bridge\", \"wlan\"", 1)
+          open(p_ip, "w", encoding="utf-8").write(s)
+          print("Patched IPEnumeration.cpp: iOS Wi-Fi (en0) and Hotspot (ap) prioritized")
+
+          # 2c. Patch LanLobbyMenu.cpp (NULL guard and safe INADDR_ANY fallback)
+          p_menu = "GeneralsMD/Code/GameEngine/Source/GameClient/GUI/GUICallbacks/Menus/LanLobbyMenu.cpp"
+          s = open(p_menu, "r", encoding="utf-8").read()
+          s = s.replace("IP = IPlist->getIP();", "IP = (IPlist != nullptr) ? IPlist->getIP() : 0;", 1)
+          old_lan_init = "if (TheLAN->SetLocalIP(IP) == FALSE) {\n\t\tLANSocketErrorDetected = TRUE;\n\t}"
+          new_lan_init = "if (TheLAN->SetLocalIP(IP) == FALSE) {\n\t\tif (TheLAN->SetLocalIP(0) == FALSE) {\n\t\t\tLANSocketErrorDetected = TRUE;\n\t\t}\n\t}"
+          s = s.replace(old_lan_init, new_lan_init, 1)
+          open(p_menu, "w", encoding="utf-8").write(s)
+          print("Patched LanLobbyMenu.cpp: Safe binding and NULL guard installed")
+          '
+
+          # 3. Patch preset to iOS 16.4 and disable libc++ availability checks
           python3 -c '
           import json
           with open("CMakePresets.json", "r") as f:
@@ -118,29 +151,19 @@ jobs:
           VULKAN_SDK: ${{ env.VULKAN_SDK }}
         run: |
           echo "==> Compiling Zero Hour Engine (z_generals)..."
-          cmake --build build/ios-vulkan --target z_generals -j 2
-
-          ENGINE_BIN=$(find build/ios-vulkan -name "GeneralsXZH" -type f | head -1)
-          if [ -z "$ENGINE_BIN" ]; then
-            echo "ERROR: GeneralsXZH binary was not produced!"
-            exit 1
-          fi
-          echo "==> Engine compiled successfully: $ENGINE_BIN"
-          ls -lh "$ENGINE_BIN"
+          cmake --build build/ios-vulkan --target z_generals --config Release -j$(sysctl -n hw.logicalcpu)
+          ls -lh build/ios-vulkan/GeneralsXZH
 
       - name: "Package App into IPA"
         run: |
-          echo "==> Locating compiled Engine binary"
-          ENGINE_BIN=$(find build/ios-vulkan -name "GeneralsXZH" -type f | head -1)
-
-          rm -rf Payload GeneralsZeroHour.ipa
+          echo "==> Creating clean iOS App Bundle structure"
           APP="Payload/GeneralsXZH.app"
-          mkdir -p "$APP/Frameworks" "$APP/GameData/fonts" "$APP/GameData/Window"
+          rm -rf Payload
+          mkdir -p "$APP/Frameworks" "$APP/GameData" "$APP/GameData/Window" "$APP/GameData/fonts"
 
-          cp "$ENGINE_BIN" "$APP/GeneralsXZH"
+          cp build/ios-vulkan/GeneralsXZH "$APP/GeneralsXZH"
           chmod +x "$APP/GeneralsXZH"
 
-          # Brand new Bundle ID and Display Name to force fresh installation on iOS
           python3 -c '
           import plistlib
           info = {
@@ -158,9 +181,9 @@ jobs:
               "CFBundleInfoDictionaryVersion": "6.0",
               "CFBundleName": "GeneralsXZH",
               "CFBundlePackageType": "APPL",
-              "CFBundleShortVersionString": "2.0",
+              "CFBundleShortVersionString": "2.1",
               "CFBundleSupportedPlatforms": ["iPhoneOS"],
-              "CFBundleVersion": "20",
+              "CFBundleVersion": "21",
               "DTPlatformName": "iphoneos",
               "LSSupportsOpeningDocumentsInPlace": True,
               "MinimumOSVersion": "16.4",
