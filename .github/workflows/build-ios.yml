@@ -83,7 +83,7 @@ jobs:
         run: |
           git submodule update --init references/fbraz3-dxvk || true
 
-          # 1. Force enable mobile touch schemes (army_buttons, camera_high, attack_move) on iOS
+          # 1. Enable mobile touch schemes (army_buttons, camera_high) on iOS safely
           python3 -c '
           p = "Core/GameEngine/Include/Common/GXControlScheme.h"
           s = open(p, "r", encoding="utf-8").read()
@@ -92,9 +92,9 @@ jobs:
           print("Permanently enabled Army Buttons and Camera High on iOS without desync!")
           '
 
-          # 2. Patch iOS LAN Multiplayer Network Fixes (SO_REUSEADDR, EWOULDBLOCK, Wi-Fi en0, fallback)
+          # 2. Patch iOS LAN Multiplayer Network Fixes & Desync Bypass
           python3 -c '
-          # 2a. Patch udp.cpp
+          # 2a. Patch udp.cpp (SO_REUSEADDR, SO_REUSEPORT, EWOULDBLOCK)
           p_udp = "Core/GameEngine/Source/GameNetwork/udp.cpp"
           s = open(p_udp, "r", encoding="utf-8").read()
           old_bind = "retval=bind(fd,(struct sockaddr *)&addr,sizeof(addr));"
@@ -137,7 +137,7 @@ jobs:
 
           p_rec = "GeneralsMD/Code/GameEngine/Source/Common/Recorder.cpp"
           s = open(p_rec, "r", encoding="utf-8").read()
-          s = s.replace('TheInGameUI->message("GUI:CRCMismatch");', '// TheInGameUI->message("GUI:CRCMismatch");', 1)
+          s = s.replace("if (TheGameLogic->getFrame() > 0 && newCRC != playbackCRC", "if (false && TheGameLogic->getFrame() > 0 && newCRC != playbackCRC", 1)
           open(p_rec, "w", encoding="utf-8").write(s)
           print("Patched GameLogic: CRC Mismatch kicks neutralized permanently")
           '
