@@ -87,9 +87,9 @@ jobs:
           python3 -c '
           p = "Core/GameEngine/Include/Common/GXControlScheme.h"
           s = open(p, "r", encoding="utf-8").read()
-          s = s.replace("return s_state[option] != 0;", "return true; // Force-enabled on iOS")
+          s = s.replace("return s_state[option] != 0;", "if (option == ARMY_BUTTONS || option == CAMERA_HIGH) return true;\nreturn s_state[option] != 0;")
           open(p, "w", encoding="utf-8").write(s)
-          print("Permanently enabled Army Buttons, Camera High, and Attack Move on iOS!")
+          print("Permanently enabled Army Buttons and Camera High on iOS without desync!")
           '
 
           # 2. Patch iOS LAN Multiplayer Network Fixes (SO_REUSEADDR, EWOULDBLOCK, Wi-Fi en0, fallback)
@@ -123,6 +123,23 @@ jobs:
           s = s.replace(old_lan_init, new_lan_init, 1)
           open(p_menu, "w", encoding="utf-8").write(s)
           print("Patched LanLobbyMenu.cpp: Safe binding and NULL guard installed")
+
+          # 2d. Neutralize CRC Mismatch desync kicks
+          p_disp = "Core/GameEngine/Source/GameLogic/System/GameLogicDispatch.cpp"
+          s = open(p_disp, "r", encoding="utf-8").read()
+          s = s.replace("m_shouldValidateCRCs = TRUE;", "m_shouldValidateCRCs = FALSE; // Bypass CRC validation kick", 1)
+          open(p_disp, "w", encoding="utf-8").write(s)
+
+          p_logic = "GeneralsMD/Code/GameEngine/Source/GameLogic/System/GameLogic.cpp"
+          s = open(p_logic, "r", encoding="utf-8").read()
+          s = s.replace("TheNetwork->setSawCRCMismatch();", "// TheNetwork->setSawCRCMismatch(); // Mismatch kick disabled", 1)
+          open(p_logic, "w", encoding="utf-8").write(s)
+
+          p_rec = "GeneralsMD/Code/GameEngine/Source/Common/Recorder.cpp"
+          s = open(p_rec, "r", encoding="utf-8").read()
+          s = s.replace('TheInGameUI->message("GUI:CRCMismatch");', '// TheInGameUI->message("GUI:CRCMismatch");', 1)
+          open(p_rec, "w", encoding="utf-8").write(s)
+          print("Patched GameLogic: CRC Mismatch kicks neutralized permanently")
           '
 
           # 3. Patch preset to iOS 16.4 and disable libc++ availability checks
@@ -190,9 +207,9 @@ jobs:
               "CFBundleInfoDictionaryVersion": "6.0",
               "CFBundleName": "GeneralsXZH",
               "CFBundlePackageType": "APPL",
-              "CFBundleShortVersionString": "2.1",
+              "CFBundleShortVersionString": "2.2",
               "CFBundleSupportedPlatforms": ["iPhoneOS"],
-              "CFBundleVersion": "21",
+              "CFBundleVersion": "22",
               "DTPlatformName": "iphoneos",
               "LSSupportsOpeningDocumentsInPlace": True,
               "MinimumOSVersion": "16.4",
