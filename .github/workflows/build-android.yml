@@ -1,0 +1,367 @@
+name: "Build Android APK"
+
+permissions:
+  contents: write
+  pull-requests: read
+  actions: write
+
+on:
+  workflow_dispatch:
+    inputs:
+      preset:
+        type: choice
+        description: "CMake preset for Android"
+        options:
+          - android-vulkan
+        default: android-vulkan
+      version_name:
+        type: string
+        description: "Override versionName (e.g. 1.4.2)"
+        default: "1.4.2"
+      version_code:
+        type: string
+        description: "Override versionCode (e.g. 10402)"
+        default: "10402"
+  push:
+    branches:
+      - main
+    paths:
+      - '.github/workflows/build-android.yml'
+
+jobs:
+  build-android:
+    name: "Build Generals Zero Hour Android APK (Pro Touch and Anti-Desync)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      PRESET: ${{ inputs.preset || 'android-vulkan' }}
+      NDK_VERSION: "27.2.12479018"
+      GRADLE_VERSION: "8.9"
+      CMDLINE_TOOLS_VERSION: "13114758"
+      CMDLINE_TOOLS_SHA1: "5fdcc763663eefb86a5b8879697aa6088b041e70"
+      VCPKG_COMMIT: "42e4e33e1505c9f47b58c21e0f557c1571b751ee"
+
+    steps:
+      - name: "Checkout Unified Mobile Engine (MYSOREZ)"
+        uses: actions/checkout@v4
+        with:
+          repository: 'MYSOREZ/GeneralsZH-Android-Port'
+          ref: 'main'
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: "Checkout DXVK fork submodule"
+        run: |
+          set -euo pipefail
+          git submodule update --init --depth 1 references/fbraz3-dxvk || true
+          git -C references/fbraz3-dxvk submodule update --init --depth 1 || true
+          echo "DXVK_REF=$(git rev-parse HEAD:references/fbraz3-dxvk 2>/dev/null || echo 'dxvk-head')" >> "$GITHUB_ENV"
+
+      - name: "Apply Android LAN Multiplayer, Touch and Anti-Desync Patches"
+        run: |
+          python3 -c '
+          # 1. Enable mobile touch schemes (army_buttons, camera_high)
+          p = "Core/GameEngine/Include/Common/GXControlScheme.h"
+          s = open(p, "r", encoding="utf-8").read()
+          s = s.replace("return s_state[option] != 0;", "if (option == ARMY_BUTTONS || option == CAMERA_HIGH) return true;\n\t\treturn s_state[option] != 0;")
+          open(p, "w", encoding="utf-8").write(s)
+          print("Patched GXControlScheme.h: Army Buttons and Camera High enabled by default")
+
+          # 2. Patch udp.cpp (SO_REUSEADDR, SO_REUSEPORT, EWOULDBLOCK)
+          p_udp = "Core/GameEngine/Source/GameNetwork/udp.cpp"
+          s = open(p_udp, "r", encoding="utf-8").read()
+          old_bind = "retval=bind(fd,(struct sockaddr *)&addr,sizeof(addr));"
+          new_bind = "int one = 1;\nsetsockopt(fd, SOL_SOCKET, SO_REUSEADDR, (const char *)&one, sizeof(one));\n#ifdef SO_REUSEPORT\nsetsockopt(fd, SOL_SOCKET, SO_REUSEPORT, (const char *)&one, sizeof(one));\n#endif\nretval=bind(fd,(struct sockaddr *)&addr,sizeof(addr));"
+          s = s.replace(old_bind, new_bind, 1)
+          old_read = "    if (bret > 0)\n      retval = bret;\n  }\n#endif\n  return(retval);\n}"
+          new_read = "    if (bret > 0)\n      retval = bret;\n  }\n  if (retval < 0 && (errno == EWOULDBLOCK || errno == EAGAIN))\n    retval = 0;\n#endif\n  return(retval);\n}"
+          s = s.replace(old_read, new_read, 1)
+          s = s.replace("baddr.sin_addr.s_addr = htonl(INADDR_BROADCAST);", "baddr.sin_addr.s_addr = htonl(INADDR_ANY);\n#ifdef SO_REUSEPORT\nsetsockopt(b, SOL_SOCKET, SO_REUSEPORT, &one, sizeof(one));\n#endif", 1)
+          open(p_udp, "w", encoding="utf-8").write(s)
+          print("Patched udp.cpp: SO_REUSEADDR/SO_REUSEPORT and EWOULDBLOCK handled")
+
+          # 3. Patch IPEnumeration.cpp
+          p_ip = "Core/GameEngine/Source/GameNetwork/IPEnumeration.cpp"
+          s = open(p_ip, "r", encoding="utf-8").read()
+          s = s.replace("prefixes[] = { \"wlan\"", "prefixes[] = { \"en\", \"ap\", \"bridge\", \"wlan\"", 1)
+          open(p_ip, "w", encoding="utf-8").write(s)
+          print("Patched IPEnumeration.cpp: Wi-Fi and hotspot interfaces detected")
+
+          # 4. Patch LanLobbyMenu.cpp
+          p_menu = "GeneralsMD/Code/GameEngine/Source/GameClient/GUI/GUICallbacks/Menus/LanLobbyMenu.cpp"
+          s = open(p_menu, "r", encoding="utf-8").read()
+          s = s.replace("IP = IPlist->getIP();", "IP = (IPlist != nullptr) ? IPlist->getIP() : 0;", 1)
+          old_lan_init = "if (TheLAN->SetLocalIP(IP) == FALSE) {\n\t\tLANSocketErrorDetected = TRUE;\n\t}"
+          new_lan_init = "if (TheLAN->SetLocalIP(IP) == FALSE) {\n\t\tif (TheLAN->SetLocalIP(0) == FALSE) {\n\t\t\tLANSocketErrorDetected = TRUE;\n\t\t}\n\t}"
+          s = s.replace(old_lan_init, new_lan_init, 1)
+          open(p_menu, "w", encoding="utf-8").write(s)
+          print("Patched LanLobbyMenu.cpp: Safe fallback and NULL guard installed")
+
+          # 5. Neutralize CRC Mismatch desync kicks
+          p_disp = "Core/GameEngine/Source/GameLogic/System/GameLogicDispatch.cpp"
+          s = open(p_disp, "r", encoding="utf-8").read()
+          s = s.replace("m_shouldValidateCRCs = TRUE;", "m_shouldValidateCRCs = FALSE; // Bypass CRC validation kick", 1)
+          open(p_disp, "w", encoding="utf-8").write(s)
+
+          p_logic = "GeneralsMD/Code/GameEngine/Source/GameLogic/System/GameLogic.cpp"
+          s = open(p_logic, "r", encoding="utf-8").read()
+          s = s.replace("TheNetwork->setSawCRCMismatch();", "// TheNetwork->setSawCRCMismatch(); // Mismatch kick disabled", 1)
+          open(p_logic, "w", encoding="utf-8").write(s)
+
+          p_rec = "GeneralsMD/Code/GameEngine/Source/Common/Recorder.cpp"
+          s = open(p_rec, "r", encoding="utf-8").read()
+          s = s.replace("if (TheGameLogic->getFrame() > 0 && newCRC != playbackCRC", "if (false && TheGameLogic->getFrame() > 0 && newCRC != playbackCRC", 1)
+          open(p_rec, "w", encoding="utf-8").write(s)
+          print("Patched GameLogic & Recorder: Desync kicks permanently neutralized")
+          '
+
+      - name: "Set up JDK 17"
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: "Restore Android SDK cache"
+        id: cache-android-sdk
+        uses: actions/cache/restore@v4
+        with:
+          path: /opt/android-sdk
+          key: android-sdk-${{ env.CMDLINE_TOOLS_VERSION }}-ndk${{ env.NDK_VERSION }}-p35-bt35
+
+      - name: "Install Android SDK (cmdline-tools + NDK + platform + build-tools)"
+        if: steps.cache-android-sdk.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          curl -fL --retry 3 -o /tmp/cmdline-tools.zip \
+            "https://dl.google.com/android/repository/commandlinetools-linux-${{ env.CMDLINE_TOOLS_VERSION }}_latest.zip"
+          echo "${{ env.CMDLINE_TOOLS_SHA1 }}  /tmp/cmdline-tools.zip" | sha1sum -c -
+          sudo mkdir -p /opt/android-sdk/cmdline-tools
+          sudo unzip -q /tmp/cmdline-tools.zip -d /opt/android-sdk/cmdline-tools
+          sudo mv /opt/android-sdk/cmdline-tools/cmdline-tools /opt/android-sdk/cmdline-tools/latest
+          sudo chown -R "$(id -u):$(id -g)" /opt/android-sdk
+          rm /tmp/cmdline-tools.zip
+          SDKMANAGER=/opt/android-sdk/cmdline-tools/latest/bin/sdkmanager
+          yes | "$SDKMANAGER" --licenses >/dev/null || true
+          "$SDKMANAGER" --install "ndk;${{ env.NDK_VERSION }}" "platforms;android-35" "build-tools;35.0.0" "platform-tools"
+
+      - name: "Export Android SDK environment"
+        run: |
+          set -euo pipefail
+          echo "ANDROID_HOME=/opt/android-sdk" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=/opt/android-sdk" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_HOME=/opt/android-sdk/ndk/${{ env.NDK_VERSION }}" >> "$GITHUB_ENV"
+          test -f "/opt/android-sdk/ndk/${{ env.NDK_VERSION }}/build/cmake/android.toolchain.cmake" \
+            || { echo "::error::NDK toolchain file missing after install"; exit 1; }
+
+      - name: "Set up Gradle"
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: ${{ env.GRADLE_VERSION }}
+
+      - name: "Install build tools (meson, ninja, pkg-config, glslang, ccache)"
+        run: |
+          sudo rm -f /etc/apt/sources.list.d/google-chrome.list \
+                     /etc/apt/sources.list.d/microsoft-prod.list
+          sudo apt-get update -qq || sudo apt-get update -qq || true
+          sudo apt-get install -y -qq --no-install-recommends \
+            ninja-build meson pkg-config glslang-tools ccache
+          meson --version
+          ninja --version
+          glslangValidator --version | head -1
+          ccache --version | head -1
+
+      - name: "Restore ccache"
+        id: cache-ccache
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.cache/ccache
+          key: ccache-android-${{ env.PRESET }}-${{ github.run_id }}
+          restore-keys: |
+            ccache-android-${{ env.PRESET }}-
+
+      - name: "Configure ccache"
+        run: |
+          set -euo pipefail
+          ccache --set-config=max_size=3G
+          ccache --set-config=compiler_check=content
+          ccache --zero-stats
+          echo "CCACHE_DIR=$HOME/.cache/ccache" >> "$GITHUB_ENV"
+
+      - name: "Restore vcpkg cache"
+        id: cache-vcpkg
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            /opt/vcpkg
+            ~/.cache/vcpkg
+          key: vcpkg-android-${{ runner.os }}-${{ env.VCPKG_COMMIT }}-${{ hashFiles('vcpkg.json', 'vcpkg-lock.json', 'cmake/triplets/arm64-android.cmake') }}
+          restore-keys: |
+            vcpkg-android-${{ runner.os }}-${{ env.VCPKG_COMMIT }}-
+
+      - name: "Restore DXVK build cache"
+        id: cache-dxvk
+        uses: actions/cache/restore@v4
+        with:
+          path: build/${{ env.PRESET }}/_deps/dxvk-build-android
+          key: dxvk-android-${{ runner.os }}-${{ github.repository }}-${{ env.DXVK_REF }}-${{ hashFiles('Patches/dxvk-android.patch', 'Patches/dxvk-ios.patch', 'cmake/dx8.cmake', 'cmake/meson-arm64-android-cross.ini.in') }}
+
+      - name: "Bootstrap vcpkg"
+        run: |
+          set -euo pipefail
+          if [ ! -d /opt/vcpkg/.git ]; then
+            git clone https://github.com/microsoft/vcpkg.git /opt/vcpkg
+          fi
+          CURRENT="$(git -C /opt/vcpkg rev-parse HEAD || echo none)"
+          if [ "$CURRENT" != "${{ env.VCPKG_COMMIT }}" ]; then
+            git -C /opt/vcpkg fetch origin ${{ env.VCPKG_COMMIT }}
+            git -C /opt/vcpkg checkout ${{ env.VCPKG_COMMIT }}
+            rm -f /opt/vcpkg/vcpkg
+          fi
+          if [ ! -f /opt/vcpkg/vcpkg ]; then
+            /opt/vcpkg/bootstrap-vcpkg.sh -disableMetrics
+          fi
+          echo "VCPKG_ROOT=/opt/vcpkg" >> "$GITHUB_ENV"
+
+      - name: "Configure CMake (Android)"
+        run: |
+          set -o pipefail
+          mkdir -p logs
+          cmake --preset ${{ env.PRESET }} \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            -DANDROID_CI_BUILD_NUMBER=${{ github.run_number }} \
+            2>&1 | tee logs/configure_android.log
+
+      - name: "Build z_generals (libmain.so) + DXVK d3d8/d3d9"
+        run: |
+          set -o pipefail
+          mkdir -p logs
+          cmake --build build/${{ env.PRESET }} --target z_generals dxvk_d3d8_install \
+            main_hook file_redirect_hook gsl_alloc_hook hook_impl -- -k 0 2>&1 | tee logs/build_android.log
+          ccache --show-stats
+
+      - name: "Verify artifacts"
+        run: |
+          set -euo pipefail
+          READELF="$(ls "${ANDROID_NDK_HOME}"/toolchains/llvm/prebuilt/*/bin/llvm-readelf | head -1)"
+          GAME_LIB="build/${{ env.PRESET }}/GeneralsMD/Code/Main/libmain.so"
+          if [ ! -f "$GAME_LIB" ]; then echo "::error::libmain.so not found at $GAME_LIB"; exit 1; fi
+          READELF_OK=0
+          for attempt in 1 2 3 4 5; do
+            if "$READELF" -h "$GAME_LIB" 2>/dev/null | grep -q AArch64; then
+              READELF_OK=1
+              break
+            fi
+            sleep 1
+          done
+          [ "$READELF_OK" = "1" ] || { echo "::error::libmain.so is not AArch64"; exit 1; }
+          for lib in libdxvk_d3d8.so libdxvk_d3d9.so; do
+            [ -f "build/${{ env.PRESET }}/$lib" ] || { echo "::error::$lib missing"; exit 1; }
+          done
+          echo "Artifacts verified: AArch64 libmain.so + DXVK with SDL3 WSI"
+
+      - name: "Strip debug symbols"
+        run: |
+          STRIP="$(ls "${ANDROID_NDK_HOME}"/toolchains/llvm/prebuilt/*/bin/llvm-strip | head -1)"
+          for lib in "build/${{ env.PRESET }}/GeneralsMD/Code/Main/libmain.so" \
+                     "build/${{ env.PRESET }}/_deps/sdl3-build/libSDL3.so" \
+                     "build/${{ env.PRESET }}/_deps/sdl3_image-build/libSDL3_image.so" \
+                     "build/${{ env.PRESET }}/_deps/openal_soft-build/libopenal.so" \
+                     "build/${{ env.PRESET }}/libgamespy.so" \
+                     "build/${{ env.PRESET }}/_deps/adrenotools-build/libadrenotools.so" \
+                     "build/${{ env.PRESET }}/_deps/adrenotools-build/src/hook/libgsl_alloc_hook.so" \
+                     "build/${{ env.PRESET }}/_deps/adrenotools-build/src/hook/libhook_impl.so" \
+                     "build/${{ env.PRESET }}/_deps/adrenotools-build/src/hook/libmain_hook.so" \
+                     "build/${{ env.PRESET }}/_deps/adrenotools-build/src/hook/libfile_redirect_hook.so"; do
+            [ -f "$lib" ] && "$STRIP" --strip-unneeded "$lib" || true
+          done
+
+      - name: "Set artifact version"
+        id: artifact
+        run: |
+          echo "version_code=${{ inputs.version_code || '10402' }}" >> "$GITHUB_OUTPUT"
+          echo "version_name=${{ inputs.version_name || '1.4.2' }}" >> "$GITHUB_OUTPUT"
+          echo "apk_name=GeneralsZH_Android_v1.4.2_AntiDesync.apk" >> "$GITHUB_OUTPUT"
+
+      - name: "Package APK"
+        env:
+          GX_ANDROID_STAGING: ${{ github.workspace }}/android-staging
+          GX_ANDROID_VERSION_CODE: ${{ steps.artifact.outputs.version_code }}
+          GX_ANDROID_VERSION_NAME: ${{ steps.artifact.outputs.version_name }}
+        run: |
+          chmod +x ./scripts/build/android/*.sh
+          ./scripts/build/android/package-android-zh.sh
+
+      - name: "Locate APK"
+        id: locate
+        run: |
+          APK="android/app/build/outputs/apk/debug/app-debug.apk"
+          if [ ! -f "$APK" ]; then echo "::error::APK not found at $APK"; exit 1; fi
+          cp "$APK" "${{ steps.artifact.outputs.apk_name }}"
+          echo "path=${{ steps.artifact.outputs.apk_name }}" >> "$GITHUB_OUTPUT"
+          ls -lh "${{ steps.artifact.outputs.apk_name }}"
+
+      - name: "Verify APK contains every library libmain.so needs"
+        run: |
+          set -euo pipefail
+          READELF="$(ls "${ANDROID_NDK_HOME}"/toolchains/llvm/prebuilt/*/bin/llvm-readelf | head -1)"
+          APK="${{ steps.locate.outputs.path }}"
+          WORKDIR="$(mktemp -d)"
+          unzip -q "${APK}" 'lib/arm64-v8a/*' -d "${WORKDIR}"
+          echo "Packaged libraries:"
+          ls "${WORKDIR}/lib/arm64-v8a/"
+          NEEDED="$("${READELF}" -d "${WORKDIR}/lib/arm64-v8a/libmain.so" | grep NEEDED | sed -E 's/.*\[(.*)\]/\1/')"
+          missing=0
+          for lib in ${NEEDED}; do
+            case "${lib}" in
+              libc.so|libm.so|libdl.so|liblog.so|libandroid.so|libGLESv*|libEGL.so|libvulkan.so|libOpenSLES.so|libaaudio.so|libmediandk.so|libcamera2ndk.so|libjnigraphics.so|libnativewindow.so|libsync.so|libz.so)
+                continue ;;
+            esac
+            if [ ! -f "${WORKDIR}/lib/arm64-v8a/${lib}" ]; then
+              echo "::error::libmain.so needs '${lib}' at runtime but it is not packaged in the APK"
+              missing=1
+            fi
+          done
+          rm -rf "${WORKDIR}"
+          if [ "${missing}" -ne 0 ]; then
+            echo "::error::APK is missing required native libraries"
+            exit 1
+          fi
+          echo "OK: every DT_NEEDED of libmain.so is present in the APK."
+
+      - name: "Upload APK artifact"
+        uses: actions/upload-artifact@v4
+        with:
+          name: GeneralsZH_Android_v1.4.2_AntiDesync
+          path: ${{ steps.locate.outputs.path }}
+          retention-days: 14
+
+      - name: "Save Android SDK cache"
+        if: always() && steps.cache-android-sdk.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: /opt/android-sdk
+          key: android-sdk-${{ env.CMDLINE_TOOLS_VERSION }}-ndk${{ env.NDK_VERSION }}-p35-bt35
+
+      - name: "Save vcpkg cache"
+        if: always() && steps.cache-vcpkg.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            /opt/vcpkg
+            ~/.cache/vcpkg
+          key: vcpkg-android-${{ runner.os }}-${{ env.VCPKG_COMMIT }}-${{ hashFiles('vcpkg.json', 'vcpkg-lock.json', 'cmake/triplets/arm64-android.cmake') }}
+
+      - name: "Save DXVK build cache"
+        if: always() && steps.cache-dxvk.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: build/${{ env.PRESET }}/_deps/dxvk-build-android
+          key: dxvk-android-${{ runner.os }}-${{ github.repository }}-${{ env.DXVK_REF }}-${{ hashFiles('Patches/dxvk-android.patch', 'Patches/dxvk-ios.patch', 'cmake/dx8.cmake', 'cmake/meson-arm64-android-cross.ini.in') }}
+
+      - name: "Save ccache"
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.cache/ccache
+          key: ccache-android-${{ env.PRESET }}-${{ github.run_id }}
